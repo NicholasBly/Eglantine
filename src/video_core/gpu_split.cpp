@@ -98,9 +98,19 @@ void GpuSplit::MaybeStart(Core::System& system_) {
     // mid-game: hand the engines back to the front (and start again when they allow it).
     const bool safe_reads = Settings::IsDMALevelDefault() ? Settings::IsGPULevelHigh()
                                                           : Settings::IsDMALevelSafe();
-    const bool allowed = !safe_reads && !Settings::IsGPULevelHigh() &&
-                         Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
-    if (active && !allowed) {
+    // EDEN_NX2_SPLIT_ACCURATE=1 (experimental): split with accurate GPU mode too, unless DMA
+    // accuracy is Safe. Command lists are read as in fast mode, with the ones on GPU-written pages
+    // flushed first (DmaPusher::FlushGpuWrittenCommands); macros stay on the back, where accurate
+    // mode's parameter re-reads can flush the caches.
+    static const bool accurate_split = [] {
+        const char* value = std::getenv("EDEN_NX2_SPLIT_ACCURATE");
+        return value != nullptr && value[0] == '1';
+    }();
+    const bool accurate = Settings::IsGPULevelHigh();
+    const bool allowed =
+        ((!safe_reads && !accurate) || (accurate_split && accurate && !Settings::IsDMALevelSafe())) &&
+        Settings::values.renderer_backend.GetValue() == Settings::RendererBackend::Vulkan;
+    if (active && (!allowed || (accurate && front_macros))) {
         Drain();
         Stop();
         LOG_INFO(HW_GPU, "GPU thread split: stopped, the accuracy settings need the caches on the front");
@@ -117,7 +127,7 @@ void GpuSplit::MaybeStart(Core::System& system_) {
 #ifdef ARCHITECTURE_x86_64
     // Front macros run compiled (macro_turing_jit.h) only.
     const char* jit = std::getenv("EDEN_NX2_MME_JIT");
-    front_macros = mode == '2' && (jit == nullptr || jit[0] != '0');
+    front_macros = mode == '2' && !accurate && (jit == nullptr || jit[0] != '0');
 #endif
     LOG_INFO(HW_GPU, "GPU thread split: engine methods run on a second thread{}",
              front_macros ? ", macros on the first" : "");
