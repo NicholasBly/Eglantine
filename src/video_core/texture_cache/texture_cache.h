@@ -134,6 +134,9 @@ void TextureCache<P>::RunGarbageCollector() {
     bool evict_old_costly = false;
     u64 ticks_to_destroy = 0;
     size_t num_iterations = 0;
+    // GPU-written images to evict are downloaded together after the passes: one GPU wait for all
+    // of them instead of one each (dozens a frame when a race starts loading).
+    boost::container::small_vector<ImageId, 16> download_evictions;
     const auto Configure = [&](bool allow_aggressive) {
         high_priority_mode = total_used_memory >= expected_memory;
         aggressive_mode = allow_aggressive && total_used_memory >= critical_memory;
@@ -147,7 +150,7 @@ void TextureCache<P>::RunGarbageCollector() {
         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
     };
     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode,
-                          &evict_old_costly](ImageId image_id) {
+                          &evict_old_costly, &download_evictions](ImageId image_id) {
         if (num_iterations == 0) {
             return true;
         }
@@ -162,12 +165,10 @@ void TextureCache<P>::RunGarbageCollector() {
             return false;
         }
         if (must_download) {
-            auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
-            const auto copies = FullDownloadCopies(image.info);
-            image.DownloadMemory(map, copies);
-            runtime.Finish();
-            SwizzleImage(*gpu_memory, image.gpu_addr, image.info, copies, map.mapped_span, swizzle_data_buffer);
-            ++gc_download_deletes;
+            if (std::ranges::find(download_evictions, image_id) == download_evictions.end()) {
+                download_evictions.push_back(image_id);
+            }
+            return false;
         }
         if (True(image.flags & ImageFlagBits::Tracked)) {
             UntrackImage(image, image_id);
@@ -198,6 +199,52 @@ void TextureCache<P>::RunGarbageCollector() {
     if (total_used_memory >= critical_memory) {
         Configure(true);
         lru_cache.ForEachItemBelow(frame_tick - ticks_to_destroy, Cleanup);
+    }
+    if (!download_evictions.empty()) {
+        // Record the downloads of a batch, wait for the GPU once, then write them back and delete
+        // the images. A batch is capped so the staging memory held at once stays bounded.
+        constexpr size_t MaxBatchBytes = 64_MiB;
+        using Map = decltype(runtime.DownloadStagingBuffer(size_t{}));
+        using Copies = decltype(FullDownloadCopies(std::declval<const ImageInfo&>()));
+        struct Pending {
+            ImageId image_id;
+            Map map;
+            Copies copies;
+        };
+        boost::container::small_vector<Pending, 16> pending;
+        size_t pending_bytes = 0;
+        const auto evict_pending = [&] {
+            if (pending.empty()) {
+                return;
+            }
+            runtime.Finish();
+            for (Pending& entry : pending) {
+                Image& image = slot_images[entry.image_id];
+                SwizzleImage(*gpu_memory, image.gpu_addr, image.info, entry.copies,
+                             entry.map.mapped_span, swizzle_data_buffer);
+                ++gc_download_deletes;
+                if (True(image.flags & ImageFlagBits::Tracked)) {
+                    UntrackImage(image, entry.image_id);
+                }
+                ++(True(image.flags & ImageFlagBits::CostlyLoad) ? gc_costly_deletes : gc_deletes);
+                UnregisterImage(entry.image_id);
+                DeleteImage(entry.image_id, image.scale_tick > frame_tick + 5);
+            }
+            pending.clear();
+            pending_bytes = 0;
+        };
+        for (const ImageId image_id : download_evictions) {
+            Image& image = slot_images[image_id];
+            if (!pending.empty() && pending_bytes + image.unswizzled_size_bytes > MaxBatchBytes) {
+                evict_pending();
+            }
+            auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
+            auto copies = FullDownloadCopies(image.info);
+            image.DownloadMemory(map, copies);
+            pending_bytes += image.unswizzled_size_bytes;
+            pending.push_back(Pending{image_id, map, std::move(copies)});
+        }
+        evict_pending();
     }
     // Switch 2 titles: textures of earlier courses otherwise stay until video memory is at the
     // driver's budget (title 1 on a 24 GB card: +2-3 GB per course, 21 GB after ~10 minutes), and
