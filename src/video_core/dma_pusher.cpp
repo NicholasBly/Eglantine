@@ -450,7 +450,9 @@ void DmaPusher::FlushGpuWrittenCommands(GPUVAddr address, size_t size) {
     // Title 1 runs small command lists its culling dispatches fill in each frame. Accurate GPU
     // mode reads every command list through the caches (safe reads); here only the ones on pages
     // the GPU has written are, or their draws run with an older frame's words (trees vanish).
-    if (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) || size == 0) {
+    // DMA accuracy "Unsafe" skips it: each such list makes the split's front wait for its back.
+    if (!Tegra::g_nx2_ampere.load(std::memory_order_relaxed) || size == 0 ||
+        Settings::values.dma_accuracy.GetValue() == Settings::DmaAccuracy::Unsafe) {
         return;
     }
     bool written = false;
