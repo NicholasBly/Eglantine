@@ -284,6 +284,14 @@ void TextureCache<P>::TickFrame() {
                     const u64 margin = (std::min)(budget / 8, 1_GiB);
                     critical_memory = budget - margin;
                     expected_memory = budget - 2 * margin;
+                    // 8-10 GB cards still had textures paged into system memory with the cache
+                    // at the budget less 1 GiB (title 1 on an 8 GB card: 57-79 ms frames that
+                    // took 16.7-21 ms with the thresholds at 75% and 60% of the budget). Keep
+                    // them there on cards whose budget is at most 12 GiB.
+                    if (budget <= 12_GiB) {
+                        critical_memory = (std::min)(critical_memory, budget / 4 * 3);
+                        expected_memory = (std::min)(expected_memory, budget / 5 * 3);
+                    }
                     // Log the first values and real changes (the budget moves by a few MiB all
                     // the time).
                     const u64 change = critical_memory > old_critical
