@@ -62,6 +62,13 @@ jobs:
             runner: windows-2022
             pgo: true
             mingw: true
+          # The PGO build for Zen 4 CPUs (Ryzen 7000/8000/9000, e.g. 7800X3D): -march=znver4
+          # (AVX-512) through the zen4 build preset. Needs a CPU with AVX-512.
+          - platform: windows-x86_64-pgo-zen4
+            runner: windows-2022
+            pgo: true
+            mingw: true
+            preset: zen4
           - platform: linux-aarch64
             runner: ubuntu-24.04-arm
           - platform: linux-aarch64-pgo
@@ -327,6 +334,7 @@ jobs:
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=lld \
+            -DYUZU_BUILD_PRESET=${{ matrix.preset || 'custom' }} \
             "-DCMAKE_C_FLAGS=$profile" \
             "-DCMAKE_CXX_FLAGS=$profile"
 
@@ -599,6 +607,11 @@ jobs:
         env:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
+          # Forks have no webhook secret: nothing to ping.
+          if [ -z "$WEBHOOK" ]; then
+            echo "No DISCORD_WEBHOOK_URL secret set, skipping"
+            exit 0
+          fi
           URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/build-${GITHUB_RUN_NUMBER}"
           MSG=$(printf '## <@&1566184315178713190> Eglantine %s build %s (%s)\n%s' \
             "$GITHUB_REF_NAME" "$GITHUB_RUN_NUMBER" "${GITHUB_SHA::7}" "$URL")
