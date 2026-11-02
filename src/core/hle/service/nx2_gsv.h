@@ -765,7 +765,7 @@ private:
                                                                         it->second.size);
             auto done = std::make_shared<std::atomic<bool>>(false);
             system.GPU().RunInOrder([done] { done->store(true, std::memory_order_release); });
-            m_gpu_only_bytes -= it->second.size;
+            // FreeReleasedRegions takes it out of m_gpu_only_bytes once the pages are returned.
             m_released_regions.push_back({std::move(it->second), done});
             m_gpu_only_regions.erase(it);
         }
